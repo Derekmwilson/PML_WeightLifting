@@ -1,0 +1,184 @@
+---
+title: "PML Weight Lifting Quality Predictions"
+author: "Derek Wilson"
+date: "June 2, 2016"
+output: html_document
+---
+
+
+For the purpose of this exercise and running the scripts below for reproducability:
+
+- it is assumed that one has downloaded the two required data sets, [training](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv) and [testing](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv)
+- the two files reside in the current working directory, set with *setwd()*
+- the downloaded 'testing' data set is refer to as the 'predict' set given it contains no indicated classes and not suitable for testing models
+
+
+Establish our envirnment. 
+
+- Load required packages. 
+- Set a date class for reading any data text fields. 
+- Define a function to read the csv files into data frames.
+
+
+```{r Prep, eval=TRUE, echo=FALSE, results="hide", warning=FALSE, error=FALSE, message=FALSE}
+
+# rm(list=ls()) # clear the environment stack
+
+filePath <- '/Users/DMW/Courses/Practical Machine Learning/Course Project/'
+setwd(filePath)
+
+```
+
+
+```{r Packages, eval=TRUE, echo=FALSE, results="hide", warning=FALSE, error=FALSE, message=FALSE}
+
+# Required Packages
+library(caret)
+library(randomForest)
+library(rpart)
+library(gbm)
+library(survival)
+library(splines)
+library(parallel)
+library(plyr)
+library(dplyr)
+library(ggplot2)
+library(xtable)
+
+# function to read in csv files
+ReadInDatafile <- function (rid_path, rid_fn) {
+     read.table(
+          paste(rid_path, rid_fn, sep=""),
+          #nrows = 100, 
+          header = TRUE, sep = ",", quote = "\"", dec = ".", 
+          na.strings = c("","NULL","0000-00-00","#DIV/0!","NA"),
+          colClasses = NA,
+          comment.char = "",
+          stringsAsFactors = FALSE
+     )
+}
+
+```
+
+Data is loaded into memory. Columns with large amounts of missing data and those columns not consequential to our research are removed.
+
+```{r LoadingCleaning, eval=TRUE, echo=FALSE, results="hide", warning=FALSE, error=FALSE, message=FALSE }
+
+filePath <- './'
+dfTraining <- ReadInDatafile(filePath, 'pml-training.csv') # Training
+dfPredict <- ReadInDatafile(filePath, 'pml-testing.csv') # Testing
+dfTraining$classe <- as.factor(dfTraining$classe)
+
+# Check for ""
+x <- apply(dfTraining,2,function(x) sum(x==""))
+sum(x[x>0]) # Only NAs
+
+# Identify and remove columns with NAs 
+naColumns <- colSums(is.na(dfTraining))/dim(dfTraining)[1]
+dfTraining <- dfTraining[, which(naColumns<0.5)]
+dfPredict <- dfPredict[, which(naColumns<0.5)]
+
+# We remove the first 7 fields. We don't feel these have any predictive power to classe.
+dfTraining <- dfTraining[, -c(1:7)]
+dfPredict <- dfPredict[, -c(1:7)]
+
+```
+
+The traing data set is large enough to accomodate a testing data set.
+
+```{r Paritioning, eval=TRUE, echo=FALSE, results="hide", warning=FALSE, error=FALSE, message=FALSE }
+
+set.seed(1234)
+inTrain <- createDataPartition(y = dfTraining$classe, p = 0.6, list = FALSE)
+training <- dfTraining[inTrain, ]
+testing <- dfTraining[-inTrain, ]
+
+```
+
+## Models
+
+We will create and test three models.
+1. Random Forest
+2. Classification and Regression Tree (CART)
+3. Gradient Boosting Machine (GBM)
+
+After building each model we apply the testing data set to build a confusion matrix and assess accuracy and out-of-sample error. 
+
+We optimize performance, also in subseqent models, by setting the *trControl* parameters for utilizing any installed parallel backend and limiting  cross-validation resampling to 4 iterations. 
+
+We then summarize the accuracy and out-of-sample error for comparison.
+
+#### Model 1  -  Random Forest
+
+```{r RFModel, eval=TRUE, echo=FALSE, results="markup", warning=FALSE, error=FALSE, message=FALSE }
+
+set.seed(5678)
+tc <- trainControl(method = "cv", number = 4, allowParallel = TRUE)
+
+modRF <- randomForest(classe ~ ., method="class", data=training, trControl=tc)
+# modRF <- train(classe ~ . , method="rf", data=training, trControl= tc)  ## Too Slow
+predRF <- predict(modRF, testing)
+cmRF <- confusionMatrix(testing$classe, predRF)
+cmRF
+
+```
+
+#### Model 2  -  Classification and Regression Tree (CART)
+
+```{r CART, eval=TRUE, echo=FALSE, results="markup", warning=FALSE, error=FALSE, message=FALSE }
+
+set.seed(3456)
+modCART <- train(classe ~ . , method="rpart", data=training, trControl= tc)
+
+predCART <- predict(modCART, testing)
+cmCART <- confusionMatrix(testing$classe, predCART)
+cmCART
+
+```
+
+#### Model 3  -  Gradient Boosting Machine (GBM)
+
+```{r GBM, eval=TRUE, echo=FALSE, results="markup", warning=FALSE, error=FALSE, message=FALSE }
+
+set.seed(7890)
+modGBM <- train(classe ~ ., method="gbm", data=training, trControl=tc, verbose= FALSE)
+
+predGBM<-predict(modGBM, testing)
+cmGBM <- confusionMatrix(testing$classe, predGBM)
+cmGBM
+
+```
+
+#### Model Accuracy and Out-of-Sampling Error
+
+```{r Summary, eval=TRUE, echo=FALSE, results="markup", error=FALSE, message=FALSE }
+
+funcMC = function(actuals, predicted){sum(predicted != actuals)/length(actuals)}
+
+accuracies <- rbind(cmRF$overall[1],cmCART$overall[1],cmGBM$overall[1])
+
+oos <-  data.frame('OoS Error' = c(
+                         funcMC(testing$classe ,predRF), 
+                         funcMC(testing$classe ,predCART), 
+                         funcMC(testing$classe ,predGBM))
+                   )
+testTable <- cbind(accuracies, oos)                        
+row.names(testTable) <- c('Random Forest', 'CART', 'GBM') 
+print(testTable)
+
+```
+
+The table above shows that the random forest model produces the greatest accuracy and lowest out-of-sample error. Therefore, we will use this model to create our predictions.
+
+## Predictions from Predict Data Set
+
+```{r Predictions, eval=TRUE, echo=FALSE, results="markup", error=FALSE, message=FALSE }
+
+predictions <- predict(modRF, newdata=dfPredict)
+print(predictions)
+
+```
+
+
+
+
